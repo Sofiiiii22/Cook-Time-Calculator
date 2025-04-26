@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Brisket Temperature Profile Simulation</title>
+  <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 30px; }
+    label, input { display: block; margin: 10px 0; }
+    #output { margin-top: 20px; }
+  </style>
+</head>
+<body>
+  <h2>Brisket Temperature Profile Simulation</h2>
+  <form id="inputForm">
+    <label>Thickness (in): <input type="number" step="any" id="thickness_in" required></label>
+    <label>Length (in): <input type="number" step="any" id="length_in" required></label>
+    <label>Width (in): <input type="number" step="any" id="width_in" required></label>
+    <label>Initial Temperature (°F): <input type="number" step="any" id="Ti" required></label>
+    <button type="submit">Run Simulation</button>
+  </form>
+  <div id="output"></div>
+  <div id="plot"></div>
+
+  <script>
+    document.getElementById('inputForm').onsubmit = function(e) {
+      e.preventDefault();
+      // Read user input
+      const thickness_in = parseFloat(document.getElementById('thickness_in').value);
+      const length_in = parseFloat(document.getElementById('length_in').value);
+      const width_in = parseFloat(document.getElementById('width_in').value);
+      const Ti = parseFloat(document.getElementById('Ti').value);
+
+      // Convert inches to meters
+      const thickness = thickness_in / 39.37;
+      const length = length_in / 39.37;
+      const width = width_in / 39.37;
+
+      // Check 1D assumption
+      if (length/thickness <= 2 && width/thickness <= 2) {
+        document.getElementById('output').innerHTML = "<b>Error:</b> Cannot assume 1 dimensionality.";
+        return;
+      }
+
+      // Constants
+      const k_brisket = 0.45; // W/m*K
+      const cp_brisket = (3.44*0.3 + 4.184*0.7) * 1000; // J/kg*K
+      const p = 1050; // kg/m^3
+      const alpha = k_brisket / (p * cp_brisket); // m^2/s
+
+      const delta_z = thickness / 20;
+      const z_nodes = Math.round(thickness / delta_z + 1);
+
+      // Initial temperature in Kelvin
+      const initial_temp = (Ti - 32) * 5/9 + 273.15;
+
+      // Initialize temperature array
+      let temp = [];
+      for (let i = 0; i < 1; i++) {
+        temp.push(Array(z_nodes).fill(initial_temp));
+      }
+
+      const t_bot = (269.3 - 32) * 5/9 + 273.15;
+      const t_top = (237.3 - 32) * 5/9 + 273.15;
+
+      const cp_air = 1.018 * 1000;
+      const mu = 23.87e-6;
+      const k_air = 35.12 / 1000;
+      const pr = cp_air * mu / k_air;
+      const g = 9.81;
+      const l = length * width / (2 * length + 2 * width);
+      const nu = 28.72e-6;
+
+      let total_time = 1 * 60; // seconds
+
+      // Find required cook time
+      let reached = false;
+      let delta_t, t_nodes;
+      while (!reached) {
+        total_time += 60;
+        delta_t = total_time / 50000;
+        t_nodes = Math.round(total_time / delta_t + 1);
+
+        if (alpha * delta_t / (delta_z ** 2) >= 0.5) {
+          document.getElementById('output').innerHTML = "<b>Error:</b> Step sizes don't allow for convergence.";
+          return;
+        }
+
+        // Reset temp
+        temp = [];
+        temp.push(Array(z_nodes).fill(initial_temp));
+
+        // Time-stepping
+        for (let i = 0; i < t_nodes - 1; i++) {
+          temp.push(Array(z_nodes).fill(0));
+          for (let j = 1; j < z_nodes - 1; j++) {
+            let f = temp[i][j+1] + temp[i][j-1] - 2 * temp[i][j];
+            temp[i+1][j] = temp[i][j] + alpha * f * delta_t / (delta_z ** 2);
+          }
+
+          // Bottom surface
+          let tf_bot = (t_bot + temp[i+1][1]) / 2;
+          let gr_bot = g * (t_bot - temp[i+1][1]) * (l ** 3) / ((nu ** 2) * tf_bot);
+          let ra_bot = gr_bot * pr;
+          let h_bot;
+          if (ra_bot <= 1e7 && ra_bot >= 1e3) {
+            h_bot = (k_air / l) * 0.54 * Math.pow(ra_bot, 0.25);
+          } else if (ra_bot > 1e7 && ra_bot <= 1e11) {
+            h_bot = (k_air / l) * 0.15 * Math.pow(ra_bot, 1/3);
+          } else {
+            document.getElementById('output').innerHTML = "<b>Error:</b> ra_bot exceeds valid range.";
+            return;
+          }
+          temp[i+1][0] = temp[i+1][1] + (delta_z * h_bot * (t_bot - temp[i+1][1]) / k_brisket);
+
+          // Top surface
+          let tf_top = (t_top + temp[i+1][z_nodes-2]) / 2;
+          let gr_top = g * (t_top - temp[i+1][z_nodes-2]) * (l ** 3) / ((nu ** 2) * tf_top);
+          let ra_top = gr_top * pr;
+          let h_top;
+          if (ra_top <= 1e11 && ra_top >= 1e3) {
+            h_top = (k_air / l) * 0.27 * Math.pow(ra_top, 0.25);
+          } else {
+            document.getElementById('output').innerHTML = "<b>Error:</b> ra_top exceeds valid range.";
+            return;
+          }
+          temp[i+1][z_nodes-1] = temp[i+1][z_nodes-2] + (delta_z * h_top * (t_top - temp[i+1][z_nodes-2]) / k_brisket);
+        }
+
+        // Check if bottom of brisket reaches 170 F
+        let temp_bottom_F = (temp[temp.length-1][0] - 273.15) * 9/5 + 32;
+        if (temp_bottom_F >= 170) {
+          reached = true;
+        }
+      }
+
+      // Convert temp to Fahrenheit for plotting
+      let temp_f = temp.map(row => row.map(val => (val - 273.15) * 9/5 + 32));
+
+      // Prepare meshgrid for plotting
+      let distance = [];
+      for (let i = 0; i < z_nodes; i++) {
+        distance.push(i * delta_z * 39.37);
+      }
+      let time = [];
+      for (let i = 0; i < temp_f.length; i++) {
+        time.push(i * delta_t / 60);
+      }
+
+      // Plot
+      let data = [{
+        z: temp_f,
+        x: distance,
+        y: time,
+        type: 'surface',
+        colorscale: 'YlOrRd',
+        showscale: true
+      }];
+      let layout = {
+        title: 'Theoretical Sample C: Temperature Profile of Brisket',
+        autosize: true,
+        scene: {
+          xaxis: {title: 'Thickness (in)'},
+          yaxis: {title: 'Time (min)'},
+          zaxis: {title: 'Temperature (°F)'}
+        }
+      };
+      Plotly.newPlot('plot', data, layout);
+
+      document.getElementById('output').innerHTML =
+        `<b>Total cook time is ${(total_time/60).toFixed(2)} minutes.</b>`;
+    };
+  </script>
+</body>
+</html>
